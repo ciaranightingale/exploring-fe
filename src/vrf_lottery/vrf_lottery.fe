@@ -1,0 +1,183 @@
+use std::context::Context
+
+# declare event to be emitted when lottery is drawn
+event Winner {
+    idx lottery_id: u256
+    idx winner: address
+}
+
+# interface workaround for LinkToken
+contract LinkToken {
+    pub fn transferAndCall(to: address, value: u256, data: Array<u8, 96>) -> bool {
+        return false
+    }
+}
+
+# interface workaround for VRFCoordinator to request randomness
+contract VRFCoordinator {
+    pub fn requestRandomWords(
+        key_hash: u256,
+        subscription_id: u64,
+        request_confirmations: u16,
+        callback_gas_limit: u32,
+        num_words: u32
+    ) -> u256 {
+        return 0
+    }
+}
+
+contract VRFLottery {
+    # feature not yet implemented
+    # const LINK_TOKEN: LinkToken = LinkToken(address(0x326C977E6efc84E512bB9C30f76E30c160eD06FB))
+    # const VRF_COORDINATOR: VRFCoordinator = VRFCoordinator(address(0x708701a1DfF4f478de54383E49a627eD4852C816))
+    # const CALLBACK_GAS_LIMIT: u32 = 60000
+    # const REQUEST_CONFIRMATIONS: u16 = 3
+    # const NUM_WORDS: u32 = 1
+    # const TICKET_PRICE: u256 = 10**15
+    # const MAX_PLAYERS: u256 = 10
+    # const MAX_LOTTERIES: u256 = 100
+    # const LOTTERY_INTERVAL: u256 = 300
+
+    # declare the variables in storage
+    link_token: LinkToken
+    vrf_coordinator: VRFCoordinator
+    subscription_id: u64
+    key_hash: u256
+    callback_gas_limit: u32
+    request_confirmations: u16
+    num_words: u32
+    ticket_price: u256
+    max_players: u256
+    max_lotteries: u256
+    lottery_interval: u256
+
+    owner: address
+    initialized: bool
+    players_counter: u256
+
+    # dependent on above feature
+    # players: Array<address, MAX_PLAYERS>
+    # lottery_ids: Array<u256, MAX_LOTTERIES>
+    # lotteries: Map<u256, Array<u256, NUM_WORDS>>
+    
+    players: Array<address, 10>
+    lottery_ids: Array<u256, 100>
+    lotteries: Map<u256, u256>
+
+    lottery_counter: u256
+    num_participants: Map<u256, u256>
+    start_timestamp: u256
+
+    pub fn __init__(self, ctx: Context) {
+        # check the contract has not yet been initialized
+        assert(not self.initialized)
+        self.initialized = true
+        self.start_timestamp = ctx.block_timestamp()
+        self.owner = ctx.msg_sender()
+        self.lottery_counter = 1
+
+        # initialize storage variables
+        self.link_token = LinkToken(address(0x326C977E6efc84E512bB9C30f76E30c160eD06FB))
+        self.vrf_coordinator = VRFCoordinator(address(0x2Ca8E0C643bDe4C2E08ab1fA0da3401AdAD7734D))
+        self.subscription_id = 4739
+        self.key_hash = 0x79d3d8832d904592c0bf9818b621522c988bb8b0c05cdc3b15aea1b6e8db0c15
+        self.callback_gas_limit = 100000
+        self.request_confirmations = 3
+        self.num_words = 1
+        self.ticket_price = 10**15
+        self.max_players = 10
+        self.max_lotteries = 100
+        self.lottery_interval = 300
+    }
+
+    # function can be called after the lottery interval has passed and a request for randomness is initiated.
+    pub fn start_lottery_draw(self, ctx: Context) {
+        # check the lottery interval has passed and the owner of the lottery is calling this function
+        assert(
+            ctx.block_timestamp() > self.start_timestamp + self.lottery_interval
+            and ctx.msg_sender() == self.owner
+        )
+
+        # copy the number of players to memory to save memory and check that there is at least 1 lottery entry
+        # initiate request for randomness and store the number of players in the current lottery & the lottery id
+        let players_counter: u256 = self.players_counter
+        if (players_counter != 0) {
+            let lottery_id: u256 = self.requestRandomness(
+                callback_gas_limit: self.callback_gas_limit,
+                request_confirmations: self.request_confirmations,
+                num_words: self.num_words
+            )
+            self.lottery_ids[self.lottery_counter] = lottery_id
+            self.num_participants[lottery_id] = players_counter
+        }
+
+        # copy the number of lotteries to memory and increment the counter
+        # check the maximum number of lotteries has not been exceeded
+        # Start a new lottery and set the counter in storage
+        let lottery_counter: u256 = self.lottery_counter + 1
+        if (lottery_counter <= self.max_lotteries) {
+            self.lottery_counter = lottery_counter
+            self.start_timestamp = ctx.block_timestamp()
+        }
+
+    }
+
+    # allow particpants to pay to enter the lottery 
+    # functions are payable by default in Fe
+    pub fn enter(self, ctx: Context) {
+        # check the participant has paid for the ticket
+        assert(ctx.msg_value() >= self.ticket_price)
+
+        # copy storage variables to memory and check the lottery interval has not passed
+        # 
+        let timestamp: u256 = ctx.block_timestamp()
+        let start_timestamp: u256 = self.start_timestamp
+        assert(timestamp > start_timestamp and timestamp < start_timestamp + self.lottery_interval)
+
+        # copy storage variables to memory and check the maximum number of players has not been exceeded
+        # increment the number of players and add their address to the players array
+        let players_counter: u256 = self.players_counter + 1
+        assert(players_counter <= self.max_players)
+        self.players_counter = players_counter
+        self.players[players_counter] = ctx.msg_sender()
+    }
+
+    # draw lottery winner and emit an event to declare the winner
+    pub fn fulfill_lottery(self, ctx: Context, lottery_id: u256, lottery_numbers: Array<u256, 64>) {
+        # copy the storage variables to memory
+        let randomness: u256 = self.lotteries[lottery_id]
+        let num_participants: u256 = self.num_participants[lottery_id]
+
+        # draw the winner and find their address
+        let index: u256 = randomness % num_participants
+        let winner: address = self.players[index]
+
+        # send the winner their funds and declare them a winner with an event
+        ctx.send_value(to: winner, wei: num_participants * self.ticket_price)
+        emit Winner(ctx, lottery_id, winner)
+    }
+
+    # initiate a request for randomness
+    fn requestRandomness(self, callback_gas_limit: u32, request_confirmations: u16, num_words: u32) -> u256 {
+        return self.vrf_coordinator.requestRandomWords(
+            key_hash: self.key_hash,
+            subscription_id: self.subscription_id,
+            request_confirmations,
+            callback_gas_limit,
+            num_words
+        )
+    }
+
+    # inheritance work around to include functionality from the VRFV2ConsumerBase Contract
+    # set the corresponding random word for the current lottery
+    fn fulfillRandomWords(self, request_id: u256, random_words: Array<u256, 64>) {
+        self.lotteries[request_id] = random_words[1]
+    }
+
+    # inheritance work around to include functionality from the VRFV2ConsumerBase Contract
+    # oracle network callback function
+    pub fn rawFulfillRandomWords(self, ctx: Context, request_id: u256, random_words: Array<u256, 64>) {
+        assert ctx.msg_sender() == address(self.vrf_coordinator), "only VRF coordinator can fulfill"
+        self.fulfillRandomWords(request_id, random_words)
+    }
+}
